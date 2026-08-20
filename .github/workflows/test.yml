@@ -14,13 +14,13 @@ on:
         description: "Repository to check, owner/name"
         required: true
       pr-number:
-        description: "Pull request number (leave empty to use the branch pair below)"
+        description: "PR number to check — or leave empty and fill in BOTH refs below"
         required: false
       base-ref:
-        description: "Base branch for branch-compare mode"
+        description: "Base branch (branch-compare mode; needs head-ref too)"
         required: false
       head-ref:
-        description: "Head branch for branch-compare mode"
+        description: "Head branch (branch-compare mode; needs base-ref too)"
         required: false
 
 permissions:
@@ -79,6 +79,15 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
+      # GitHub cannot make one dispatch input conditionally required, so catch
+      # a target-less dispatch here with an actionable message instead of
+      # letting the action report "no target" and tripping the assert below.
+      - name: A target is required
+        if: inputs.pr-number == '' && (inputs.base-ref == '' || inputs.head-ref == '')
+        run: |
+          echo "::error::Give this dispatch a target: either pr-number, or both base-ref and head-ref."
+          exit 1
+
       - uses: actions/checkout@v4
 
       - name: Seed a spec for the run
