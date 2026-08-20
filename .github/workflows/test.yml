@@ -6,7 +6,7 @@ name: Test
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]        # any branch, whatever the default is called
   pull_request:
   workflow_dispatch:
     inputs:
