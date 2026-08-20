@@ -1,0 +1,159 @@
+name: Test
+
+# The script is the product here, so lint runs on every push. The live check
+# needs a real key and a repository synced into a ScopeDocs workspace, so it is
+# dispatched by hand (or nightly) rather than blocking every commit.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repository to check, owner/name"
+        required: true
+      pr-number:
+        description: "Pull request number (leave empty to use the branch pair below)"
+        required: false
+      base-ref:
+        description: "Base branch for branch-compare mode"
+        required: false
+      head-ref:
+        description: "Head branch for branch-compare mode"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint the action script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: shellcheck spec-drift-check.sh
+
+      - name: action.yml is valid YAML and declares every input the script reads
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re, sys, yaml
+
+          action = yaml.safe_load(open("action.yml"))
+          step = action["runs"]["steps"][0]
+          passed = set(step["env"])
+
+          script = open("spec-drift-check.sh").read()
+          # Every ${INPUT_*} / ${SCOPEDOCS_*} the script reads must be handed in.
+          read = set(re.findall(r"\$\{(INPUT_[A-Z_]+|SCOPEDOCS_[A-Z_]+|DEFAULT_[A-Z_]+|EVENT_[A-Z_]+)", script))
+          missing = sorted(read - passed)
+          if missing:
+              sys.exit(f"action.yml does not pass: {', '.join(missing)}")
+
+          # Every declared input should reach the script, or it does nothing.
+          declared = {f"INPUT_{name.replace('-', '_').upper()}" for name in action["inputs"]}
+          declared -= {"INPUT_API_KEY", "INPUT_API_URL"}  # passed as SCOPEDOCS_*
+          unused = sorted(declared - passed)
+          if unused:
+              sys.exit(f"inputs declared but never passed to the script: {', '.join(unused)}")
+
+          print(f"{len(read)} variables read, all passed; {len(action['inputs'])} inputs declared")
+          PY
+
+      - name: Guard rails the script must keep
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          grep -q 'set -euo pipefail' spec-drift-check.sh || fail "lost 'set -euo pipefail'"
+          grep -q -- '--max-time' spec-drift-check.sh || fail "a curl call without --max-time can hang the job"
+          grep -q -- '--rawfile' spec-drift-check.sh || fail "the spec must be passed by file, not on the command line"
+          grep -q 'jq -e .' spec-drift-check.sh || fail "poll responses must be validated as JSON before jq reads them"
+          grep -q 'HTTP" != "200"' spec-drift-check.sh || fail "the POST status must be checked before polling a run id"
+          echo "all guard rails present"
+
+  live-check:
+    name: Live drift check
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Seed a spec for the run
+        run: |
+          mkdir -p .scopedocs
+          cat > .scopedocs/drift-spec.md <<'EOF'
+          What: the drift check runs from CI and reports what shipped.
+          How: a composite action calls the ScopeDocs v1 API and writes the
+          rendered report into the workflow job summary.
+          Expected: a failing key, a missing spec, or a failed run each report a
+          reason instead of breaking the build.
+          How would you know: the job summary names the outcome in every case.
+          EOF
+
+      - id: drift
+        uses: ./
+        with:
+          api-key: ${{ secrets.SCOPEDOCS_API_KEY }}
+          api-url: ${{ secrets.SCOPEDOCS_API_URL }}
+          repo: ${{ inputs.repo }}
+          pr-number: ${{ inputs.pr-number }}
+          base-ref: ${{ inputs.base-ref }}
+          head-ref: ${{ inputs.head-ref }}
+
+      - name: Show what the action reported
+        run: |
+          echo "status=${{ steps.drift.outputs.status }}"
+          echo "coverage=${{ steps.drift.outputs.coverage-score }}"
+          echo "run-id=${{ steps.drift.outputs.run-id }}"
+
+      - name: A dispatched live check must actually reach a verdict
+        if: steps.drift.outputs.status != 'complete'
+        run: |
+          echo "::error::expected status=complete, got '${{ steps.drift.outputs.status }}'"
+          exit 1
+
+  missing-key:
+    name: Failure path — no API key
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The most common real-world failure (fork PR, unset secret) must report
+      # a reason and leave the build green.
+      - id: drift
+        uses: ./
+        with:
+          api-key: ""
+
+      - name: Reported as an error without failing the job
+        run: |
+          [ "${{ steps.drift.outputs.status }}" = "error" ] || {
+            echo "::error::expected status=error, got '${{ steps.drift.outputs.status }}'"
+            exit 1
+          }
+          echo "empty key reported cleanly"
+
+  missing-spec:
+    name: Failure path — no spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: drift
+        uses: ./
+        with:
+          api-key: "sk-sd_not_a_real_key"
+          spec-file: ".scopedocs/does-not-exist.md"
+          base-ref: "main"
+          head-ref: "some-feature"
+
+      - name: Skipped, not failed
+        run: |
+          [ "${{ steps.drift.outputs.status }}" = "skipped" ] || {
+            echo "::error::expected status=skipped, got '${{ steps.drift.outputs.status }}'"
+            exit 1
+          }
+          echo "missing spec reported cleanly"

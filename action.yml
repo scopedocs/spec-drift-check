@@ -1,0 +1,98 @@
+name: "ScopeDocs spec drift check"
+description: "Check whether a code change actually implements the spec it was written from, and write the report into the job summary."
+author: "ScopeDocs"
+
+branding:
+  icon: "git-pull-request"
+  color: "blue"
+
+inputs:
+  api-key:
+    description: "ScopeDocs API key with the prs:read scope. Store it as a repository secret."
+    required: true
+  api-url:
+    description: "ScopeDocs backend base URL. Defaults to https://api.scopedocs.ai; set it only for a self-hosted deployment."
+    required: false
+    default: ""
+  spec-file:
+    description: "Path to the committed spec. On pull_request events the PR body is used when this file is absent."
+    required: false
+    default: ".scopedocs/drift-spec.md"
+  repo:
+    description: "Repository to check, owner/name. Defaults to the repository running the workflow."
+    required: false
+    default: ""
+  pr-number:
+    description: "Pull request number to check. Defaults to the PR that triggered the workflow, when there is one."
+    required: false
+    default: ""
+  base-ref:
+    description: "Release base for branch-compare mode. Set this on push triggers; leave empty to check a pull request."
+    required: false
+    default: ""
+  head-ref:
+    description: "Branch carrying the change, used with base-ref."
+    required: false
+    default: ""
+  workspace-id:
+    description: "Only needed when the API key spans an organization with more than one workspace."
+    required: false
+    default: ""
+  wait-seconds:
+    description: "How long the API holds the request open before the action starts polling (0-240)."
+    required: false
+    default: "20"
+  poll-timeout-seconds:
+    description: "How long to keep polling for a result before giving up."
+    required: false
+    default: "600"
+  fail-under:
+    description: "Fail the job when the coverage score is below this value, e.g. 0.6. Empty means report-only."
+    required: false
+    default: ""
+  report-path:
+    description: "Where to write the report markdown, so a later step can upload it as an artifact."
+    required: false
+    default: "drift-report.md"
+  job-summary:
+    description: "Write the report into the workflow job summary."
+    required: false
+    default: "true"
+
+outputs:
+  status:
+    description: "complete, failed, timeout, error, or skipped."
+    value: ${{ steps.drift.outputs.status }}
+  coverage-score:
+    description: "Share of the intent that shipped, 0..1. Empty unless status is complete."
+    value: ${{ steps.drift.outputs.coverage-score }}
+  run-id:
+    description: "Drift run id, for fetching the report again later."
+    value: ${{ steps.drift.outputs.run-id }}
+  report-path:
+    description: "Path of the written report markdown, when one was produced."
+    value: ${{ steps.drift.outputs.report-path }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: drift
+      shell: bash
+      env:
+        SCOPEDOCS_API_KEY: ${{ inputs.api-key }}
+        SCOPEDOCS_API_URL: ${{ inputs.api-url || 'https://api.scopedocs.ai' }}
+        INPUT_SPEC_FILE: ${{ inputs.spec-file }}
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        INPUT_BASE_REF: ${{ inputs.base-ref }}
+        INPUT_HEAD_REF: ${{ inputs.head-ref }}
+        INPUT_WORKSPACE_ID: ${{ inputs.workspace-id }}
+        INPUT_WAIT_SECONDS: ${{ inputs.wait-seconds }}
+        INPUT_POLL_TIMEOUT_SECONDS: ${{ inputs.poll-timeout-seconds }}
+        INPUT_FAIL_UNDER: ${{ inputs.fail-under }}
+        INPUT_REPORT_PATH: ${{ inputs.report-path }}
+        INPUT_JOB_SUMMARY: ${{ inputs.job-summary }}
+        DEFAULT_REPO: ${{ github.repository }}
+        DEFAULT_HEAD_REF: ${{ github.ref_name }}
+        EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: bash "$GITHUB_ACTION_PATH/spec-drift-check.sh"
